@@ -1,7 +1,5 @@
-<<<<<<< HEAD
 % federated_byzantine_experiments.m
 % 元コードを拡張：intermittent / small_noise / label_flip の3攻撃を比較
-% 攻撃がどの程度効果があるのかを比較
 % 安全目的の研究用シミュレーションです
 
 clear; close all; rng('shuffle');
@@ -174,25 +172,15 @@ s_acc = squeeze(std(results_mean_acc, 0, 3));
 % プロット
 figure('Position',[200 200 900 500]); hold on; grid on;
 colors = lines(length(attack_modes_all));
-h = gobjects(1, length(attack_modes_all)); % 凡例用ハンドルを保持
-epoch_vec = 1:epochs;
-
 for i = 1:length(attack_modes_all)
-    % 平均値のライン
-    h(i) = plot(epoch_vec, m_acc(i,:), 'LineWidth', 1.8, 'Color', colors(i,:));
-
-    % 標準偏差のエラーバンド
-    fill([epoch_vec fliplr(epoch_vec)], ...
-         [m_acc(i,:) + s_acc(i,:) fliplr(m_acc(i,:) - s_acc(i,:))], ...
-         colors(i,:), 'FaceAlpha', 0.15, 'EdgeColor', 'none');
+    epoch_vec = 1:epochs;
+    plot(epoch_vec, m_acc(i,:), 'LineWidth', 1.8, 'Color', colors(i,:));
+    % striped error band
+    fill([epoch_vec fliplr(epoch_vec)], [m_acc(i,:) + s_acc(i,:) fliplr(m_acc(i,:) - s_acc(i,:))], ...
+         colors(i,:), 'FaceAlpha', 0.12, 'EdgeColor', 'none');
 end
-
-xlabel('Epoch');
-ylabel('Mean Client Accuracy (%)');
-
-% 凡例を attack_modes_all に正しく対応させる
-legend(h, attack_modes_all, 'Location', 'best');
-
+xlabel('Epoch'); ylabel('Mean Client Accuracy (%)');
+legend(attack_modes_all, 'Location', 'best');
 title('Attack mode comparison (mean acc across clients)');
 xlim([1 epochs]);
 
@@ -204,141 +192,4 @@ end
 
 % 保存（オプション）
 save('exp_results_attack_modes.mat', 'results_mean_acc', 'm_acc', 's_acc', 'attack_modes_all');
-=======
-%% federated_attack_comparison.m
-% 複数攻撃モード比較のためのFLシミュレーション
-clear; close all; rng('shuffle');
 
-%% ===== 実験パラメータ =====
-K = 30;                         % クライアント数
-mu = 0.01;                      % 学習率
-epochs = 400;                   % エポック数
-num_trials = 5;                 % 試行数
-attacker_ratio = 1/3;           % 攻撃者割合
-attack_modes = {'none','sign-flipping','intermittent','small_noise','label_flip'};
-intermittent_p = 0.3;           % 間欠攻撃確率
-noise_scale = 0.01;             % 小振幅ノイズ
-label_flip_ratio = 0.2;         % ラベル汚染割合
-detect_epochs = 200; tau = -2; acc_threshold_ratio = 0.98;
-
-%% ===== データ読み込み（MNIST 0/1） =====
-[XTrain,YTrain] = digitTrain4DArrayData;
-idx = (YTrain=='0') | (YTrain=='1');
-X_full = reshape(XTrain(:,:,:,idx),[],sum(idx))';
-Y_full = double(YTrain(idx)=='1');
-N_total = size(X_full,1);
-d = size(X_full,2);
-
-%% ===== 結果保存 =====
-results_mean_acc = zeros(length(attack_modes), epochs, num_trials);
-
-%% ===== 実験ループ =====
-for trial = 1:num_trials
-    rng(trial); fprintf("=== Trial %d / %d ===\n", trial,num_trials);
-
-    % IID分割
-    perm = randperm(N_total); X = X_full(perm,:); Y = Y_full(perm);
-    data_per_client = floor(N_total/K);
-    X_clients = cell(1,K); Y_clients = cell(1,K);
-    for k=1:K
-        idk = (k-1)*data_per_client+1 : k*data_per_client;
-        X_clients{k} = X(idk,:); Y_clients{k} = Y(idk);
-    end
-
-    % 攻撃者決定
-    num_attackers = max(1,floor(K*attacker_ratio));
-    attackers = randperm(K,num_attackers);
-    fprintf("Attackers: %s\n", mat2str(attackers));
-
-    for mode_idx = 1:length(attack_modes)
-        attack_mode = attack_modes{mode_idx};
-        fprintf(" Mode: %s\n", attack_mode);
-
-        % クライアントデータコピー
-        Xc = X_clients; Yc = Y_clients;
-        if strcmp(attack_mode,'label_flip')
-            for a = attackers
-                n_local = length(Yc{a});
-                flip_idx = randperm(n_local,floor(label_flip_ratio*n_local));
-                Yc{a}(flip_idx) = 1 - Yc{a}(flip_idx);
-            end
-        end
-
-        w_global = zeros(d,1); acc_history = zeros(1,epochs);
-
-        % エポックループ
-        for epoch=1:epochs
-            grads = zeros(d,K); acc_clients = zeros(1,K);
-            for k=1:K
-                Xk = Xc{k}; Yk = Yc{k};
-                pred_labels = double((Xk*w_global)>=0);
-                acc_clients(k) = mean(pred_labels==Yk)*100;
-
-                % ロジスティック回帰勾配
-                pred = 1./(1+exp(-Xk*w_global));
-                grad = Xk'*(pred-Yk)/size(Xk,1);
-
-                % 攻撃適用
-                if ismember(k,attackers)
-                    switch attack_mode
-                        case 'sign-flipping'
-                            grad = -grad;
-                        case 'intermittent'
-                            if rand()<intermittent_p
-                                grad = -grad;
-                            end
-                        case 'small_noise'
-                            gnorm = norm(grad);
-                            if gnorm>0, grad = grad + noise_scale*gnorm*randn(size(grad)); end
-                        case 'label_flip'
-                            % 既にラベル汚染済み
-                    end
-                end
-
-                grads(:,k) = grad;
-            end
-
-            % 集約（平均）
-            w_global = w_global - mu*mean(grads,2);
-            acc_history(epoch) = mean(acc_clients);
-
-            if mod(epoch,100)==0 || epoch==epochs
-                fprintf("  Epoch %d: Acc %.2f%%\n", epoch, acc_history(epoch));
-            end
-        end
-
-        results_mean_acc(mode_idx,:,trial) = acc_history;
-    end
-end
-
-%% ===== 結果処理 =====
-m_acc = squeeze(mean(results_mean_acc,3));
-s_acc = squeeze(std(results_mean_acc,0,3));
-
-%% ===== プロット =====
-figure('Position',[200 200 900 500]); hold on; grid on;
-colors = lines(length(attack_modes));
-epoch_vec = 1:epochs;
-h = gobjects(1,length(attack_modes)); % 凡例用ハンドル
-
-for i = 1:length(attack_modes)
-    % 平均ラインを描画し、ハンドルを保存
-    h(i) = plot(epoch_vec, m_acc(i,:), 'LineWidth', 1.8, 'Color', colors(i,:));
-
-    % エラーバンドを描画（凡例には含めない）
-    fill([epoch_vec fliplr(epoch_vec)], ...
-         [m_acc(i,:) + s_acc(i,:) fliplr(m_acc(i,:) - s_acc(i,:))], ...
-         colors(i,:), 'FaceAlpha', 0.15, 'EdgeColor', 'none', 'HandleVisibility','off');
-end
-
-xlabel('Epoch'); ylabel('Mean Client Accuracy (%)');
-legend(h, attack_modes, 'Location','best'); % ラインだけを凡例に
-title('Attack mode comparison (IID clients)');
-xlim([1 epochs]);
-
-fprintf('\n=== Final epoch mean accuracies ===\n');
-for i=1:length(attack_modes)
-    fprintf(' %s : %.3f %% (std=%.3f)\n', attack_modes{i}, m_acc(i,epochs), s_acc(i,epochs));
-end
-
-save('exp_results_attack_modes.mat','results_mean_acc','m_acc','s_acc','attack_modes');
