@@ -1,11 +1,11 @@
-% 先行研究の実証
-% コサイン類似度によって攻撃者を特定し、正常化
+% =========================
+% ラベルを変更することで攻撃 
+% =========================
 
 % =========================
 % パラメータ設定
 % =========================
 K = 30;         % クライアント数
-alpha = 1;      % ステップサイズ
 mu = 0.01;      % 学習率
 tau = -2;       % 提案手法の閾値
 epochs = 1000;  % エポック数
@@ -34,15 +34,16 @@ for cond_idx = 1:length(conditions)
     % IID分割
     N = size(X,1);
     perm = randperm(N);
-    X = X(perm,:);
-    Y = Y(perm);
+    X_perm = X(perm,:);
+    Y_perm = Y(perm);
     data_per_client = floor(N/K);
+    X_clients = cell(1,K); Y_clients = cell(1,K);
     for k = 1:K
         idk = (k-1)*data_per_client + 1 : k*data_per_client;
-        X_clients{k} = X(idk,:);
-        Y_clients{k} = Y(idk);
+        X_clients{k} = X_perm(idk,:);
+        Y_clients{k} = Y_perm(idk);
     end
-    
+
     % 攻撃者設定
     attackers = randperm(K, floor(K * attacker_ratio));
     fprintf("実際の攻撃者: %s\n", mat2str(attackers));
@@ -59,10 +60,16 @@ for cond_idx = 1:length(conditions)
         grads = zeros(size(X,2), K);
         acc_clients = zeros(1, K);
 
-        % 各クライアント更新
         for k = 1:K
             Xk = X_clients{k};
-            Yk = Y_clients{k};
+            Yk = Y_clients{k};  % 元ラベルを取得
+
+            % --- 攻撃者ラベル反転（条件B/C） ---
+            if ismember(cond, ["B","C"]) && ismember(k, attackers)
+                if cond == "B" || (cond == "C" && epoch <= detect_epochs)
+                    Yk = 1 - Yk;  % 攻撃者は反転
+                end
+            end
 
             % 精度計算
             pred_labels = double((Xk * w_global) >= 0);
@@ -72,50 +79,38 @@ for cond_idx = 1:length(conditions)
             pred = 1 ./ (1 + exp(-Xk * w_global));
             grad = Xk' * (pred - Yk) / size(Xk,1);
 
-            % 攻撃者の挙動と検出後の反転の反転（条件B/C）
-            if cond == "B"
-                if ismember(k, attackers)
-                    grad = -grad; % 攻撃者は常に反転
-                end
-            elseif cond == "C"
-                if ismember(k, attackers)
-                    grad = -grad; % 攻撃者は検出前は反転攻撃
-                end
-                if epoch > detect_epochs && ismember(k, detected_attackers)
-                    grad = -grad; % 検出後は検出された攻撃者だけ反転の反転（正常化）
-                end
+            % 条件C: 検出後はラベルを元に戻す
+            if cond == "C" && ismember(k, detected_attackers) && epoch > detect_epochs
+                Yk = 1 - Yk;      % ラベル正常化
+                grad = Xk' * (pred - Yk) / size(Xk,1); % 勾配も再計算
             end
 
             grads(:,k) = grad;
         end
 
         % 条件C: 攻撃検出処理
-        if cond == "C"
-            if epoch <= detect_epochs
-                cos_sims = zeros(K,K);
-                for i = 1:K
-                    for j = 1:K
-                        if i ~= j
-                            g_i = grads(:,i);
-                            g_j = grads(:,j);
-                            if norm(g_i) ~= 0 && norm(g_j) ~= 0
-                                cos_sims(i,j) = (g_i' * g_j) / (norm(g_i) * norm(g_j));
-                            end
+        if cond == "C" && epoch <= detect_epochs
+            cos_sims = zeros(K,K);
+            for i = 1:K
+                for j = 1:K
+                    if i ~= j
+                        g_i = grads(:,i);
+                        g_j = grads(:,j);
+                        if norm(g_i) ~= 0 && norm(g_j) ~= 0
+                            cos_sims(i,j) = (g_i' * g_j) / (norm(g_i) * norm(g_j));
                         end
                     end
                 end
-
-                for i = 1:K
-                    sum_cos = sum(cos_sims(i,:));
-                    if sum_cos <= tau
-                        suspect_counts(i) = suspect_counts(i) + 1;
-                    end
+            end
+            for i = 1:K
+                sum_cos = sum(cos_sims(i,:));
+                if sum_cos <= tau
+                    suspect_counts(i) = suspect_counts(i) + 1;
                 end
-
-                if epoch == detect_epochs
-                    detected_attackers = find(suspect_counts >= acc_threshold_ratio * detect_epochs);
-                    fprintf("条件C 検出された攻撃者: %s\n", mat2str(detected_attackers));
-                end
+            end
+            if epoch == detect_epochs
+                detected_attackers = find(suspect_counts >= acc_threshold_ratio * detect_epochs);
+                fprintf("条件C 検出された攻撃者: %s\n", mat2str(detected_attackers));
             end
         end
 
@@ -128,8 +123,7 @@ for cond_idx = 1:length(conditions)
 
         % ログ
         if mod(epoch,100) == 0 || epoch == epochs
-            fprintf("条件%s Epoch %d: 精度 %.2f%%\n", ...
-                cond, epoch, acc_history(epoch));
+            fprintf("条件%s Epoch %d: 精度 %.2f%%\n", cond, epoch, acc_history(epoch));
         end
     end
 
@@ -137,16 +131,12 @@ for cond_idx = 1:length(conditions)
 end
 
 % =========================
-% グラフ描画（精度推移のみ）
+% グラフ描画
 % =========================
-figure;
-hold on;
+figure; hold on;
 colors = {'b','r','g'};
 for i = 1:length(conditions)
     plot(1:epochs, results_acc{i}, 'LineWidth', 1.5, 'Color', colors{i});
 end
-xlabel('Epoch');
-ylabel('Accuracy (%)');
-legend(conditions);
-title('精度推移');
-grid on;
+xlabel('Epoch'); ylabel('Accuracy (%)');
+legend(conditions); title('精度推移'); grid on;
